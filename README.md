@@ -4,8 +4,8 @@
 
 A two-stage multimodal diagnostic pipeline for oral cancer screening:
 
-1. **Stage 1 — Oral Region Segmentation**: ResNet18-UNet extracts stable ROI from clinical oral images (**Dice: 0.9700**)
-2. **Stage 2 — Multimodal Classification**: EfficientNetV2-S + SE channel attention + clinical metadata fusion with EMA & weighted label smoothing
+1. **Stage 1 -- Oral Region Segmentation**: ResNet18-UNet extracts stable ROI from clinical oral images (**Dice: 0.9700**)
+2. **Stage 2 -- Multimodal Classification**: EfficientNetV2-S + SE channel attention + clinical metadata fusion with EMA & weighted label smoothing
 
 ### Model Architecture
 
@@ -29,6 +29,8 @@ SE Block (channel recalibration)           |
 ---
 
 ## Results
+
+All tables and figures below correspond to the paper's experimental section.
 
 ### Table 1: Training Configuration
 
@@ -58,9 +60,7 @@ SE Block (channel recalibration)           |
 | ConvNeXt-Tiny | 0.7919 +- 0.0305 | 0.8808 +- 0.0152 | 0.8143 +- 0.0660 | 0.7632 +- 0.0236 | 0.5377 +- 0.0352 | 0.8469 +- 0.0136 |
 | ResNet50 | 0.7900 +- 0.0280 | 0.8716 +- 0.0175 | 0.8223 +- 0.0577 | 0.7585 +- 0.0235 | 0.5259 +- 0.0488 | 0.8450 +- 0.0182 |
 
-![Backbone Comparison](results/figures/backbone_comparison.png)
-
-![ROC Backbone](results/figures/roc_backbone_replot.png)
+![Fig.4: ROC Backbone Comparison](results/figures/roc_backbone_replot.png)
 
 ### Table 3: Fusion Strategy Comparison
 
@@ -71,10 +71,6 @@ SE Block (channel recalibration)           |
 | Multi-Task Learning | 0.8137 +- 0.0317 | 0.8865 +- 0.0050 | 0.8420 +- 0.0554 | 0.7857 +- 0.0284 | 0.5774 +- 0.0504 | 0.8742 +- 0.0101 |
 | Bidirectional Cross-Attention | 0.8044 +- 0.0127 | 0.8859 +- 0.0117 | 0.8277 +- 0.0323 | 0.7762 +- 0.0095 | 0.5585 +- 0.0174 | 0.8629 +- 0.0152 |
 | Element-wise Addition | 0.7981 +- 0.0200 | 0.8825 +- 0.0218 | 0.8232 +- 0.0548 | 0.7687 +- 0.0144 | 0.5470 +- 0.0212 | 0.8485 +- 0.0126 |
-
-![Fusion Comparison](results/figures/fusion_comparison.png)
-
-![Fusion ROC](results/figures/fusion_roc.png)
 
 ### Table 4: Ablation Study
 
@@ -87,42 +83,48 @@ SE Block (channel recalibration)           |
 | Unimodal (Image Only) | 0.7531 +- 0.0420 | 0.8626 +- 0.0245 | 0.7723 +- 0.0811 | 0.7226 +- 0.0352 | 0.4627 +- 0.0564 | 0.8273 +- 0.0279 |
 | Unimodal (Metadata Only) | 0.7687 +- 0.0551 | 0.8606 +- 0.0133 | 0.8000 +- 0.0970 | 0.7371 +- 0.0474 | 0.4888 +- 0.0837 | 0.8188 +- 0.0115 |
 
-![Ablation Comparison](results/figures/ablation_comparison.png)
+![Fig.5: ROC Ablation Comparison](results/figures/roc_ablation_replot.png)
 
-![ROC Ablation](results/figures/roc_ablation_replot.png)
+### Fig.6: Grad-CAM Visualization
 
-### Grad-CAM Visualization (NoSE vs WithSE)
+SE channel attention concentrates activation on lesion regions, suppressing background noise.
 
-Channel attention (SE module) concentrates activation on lesion regions, suppressing background noise.
+![Fig.6: Grad-CAM Overview](results/figures/gradcam_overview.png)
 
-![Grad-CAM Overview](results/figures/gradcam_overview.png)
-
-![Grad-CAM with GT Mask](results/figures/gradcam_gtmask_overview.png)
+![Fig.6: Grad-CAM with Ground Truth Mask](results/figures/gradcam_gtmask_overview.png)
 
 ---
 
 ## Repository Structure
 
 ```
-├── data/                           # Metadata CSVs (images not included)
+├── data/                          # Metadata CSVs (images not included)
 ├── src/
-│   ├── models.py                   # ImgSEModel, SEBlock, MetaMLP, build_head
-│   ├── dataset.py                  # MultiModalDataset, data loading & splitting
-│   ├── train_utils.py              # ModelEMA, WeightedLabelSmoothingLoss, evaluate
-│   ├── segmentation.py             # ResNet18-UNet oral segmentation
-│   ├── train_img_se_baseline.py    # Baseline: ImgSE + Concat + EMA + WLS
-│   ├── train_backbone_ablation.py  # Backbone comparison & ablation study
-│   ├── train_meta_only.py          # Metadata-only model
-│   ├── generate_meta_npy.py        # Generate test predictions for meta-only
-│   ├── train_fusion_innovation.py  # Fusion strategy comparison experiments
-│   ├── train_fusion_gated.py       # ImgSE + Gated fusion
-│   ├── train_fusion_add.py         # ImgSE + Add fusion
-│   └── plot_roc_curves.py          # ROC curve plotting
+│   ├── models.py                  # ImgSEModel, SEBlock, MetaMLP, build_head
+│   ├── dataset.py                 # MultiModalDataset, data loading & splitting
+│   ├── train_utils.py             # ModelEMA, WeightedLabelSmoothingLoss, evaluate
+│   ├── segmentation.py            # Stage 1: ResNet18-UNet oral segmentation
+│   ├── train_img_se_baseline.py   # Stage 2: ImgSE baseline (MAIN script)
+│   ├── train_backbone_ablation.py # Table 2 backbone comparison + Table 4 ablation
+│   ├── train_fusion_innovation.py # Table 3 fusion strategy comparison
+│   └── train_meta_only.py         # Table 4 metadata-only model
 ├── results/
-│   ├── tables/                     # Per-fold CSV results
-│   └── figures/                    # Comparison charts, ROC curves, Grad-CAM
+│   ├── tables/                    # Per-fold CSV results
+│   └── figures/                   # Paper figures (Fig.4-6)
 └── requirements.txt
 ```
+
+### Code Logic
+
+The experiments follow the paper's progressive logic: **backbone → fusion → ablation**.
+
+1. **`segmentation.py`** — Run first. Trains ResNet18-UNet to extract oral ROI from raw clinical images (Dice 0.9700). Outputs segmented images for Stage 2.
+2. **`train_img_se_baseline.py`** — The core baseline. Implements the full model: EfficientNetV2-S + SE + MetaMLP + Concat fusion + EMA + Weighted Label Smoothing. This is the paper's main contribution.
+3. **`train_backbone_ablation.py`** — Reproduces Table 2 (6 backbone variants) and Table 4 rows 1-5 (NoSE, NoEMA, WCE, Image-only ablations).
+4. **`train_fusion_innovation.py`** — Reproduces Table 3 (Concat, Multi-Task, Cross-Attention fusion strategies).
+5. **`train_meta_only.py`** — Reproduces Table 4 row 6 (Metadata-only baseline).
+
+Shared modules (`models.py`, `dataset.py`, `train_utils.py`) are extracted from the baseline and imported by all experiment scripts.
 
 ---
 
