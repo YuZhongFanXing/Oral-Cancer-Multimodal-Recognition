@@ -1,6 +1,5 @@
 # Multimodal Recognition of Oral Cancer Integrating SE Attention and Metadata
 
-[中文论文](paper/%E8%9E%8D%E5%90%88SE%E6%B3%A8%E6%84%8F%E5%8A%9B%E4%B8%8E%E5%85%83%E6%95%B0%E6%8D%AE%E7%9A%84%E5%8F%A3%E8%85%94%E7%99%8C%E5%A4%9A%E6%A8%A1%E6%80%81%E8%AF%86%E5%88%AB(3).docx)
 
 ## Overview
 

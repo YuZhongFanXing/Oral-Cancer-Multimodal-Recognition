@@ -1,3 +1,6 @@
+# Paper (not for upload)
+paper/
+
 # Model checkpoints
 *.pth
 *.pt
