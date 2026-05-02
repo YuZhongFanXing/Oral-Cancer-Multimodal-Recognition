@@ -7,30 +7,23 @@ A two-stage multimodal diagnostic pipeline for oral cancer screening:
 1. **Stage 1 -- Oral Region Segmentation**: ResNet18-UNet extracts stable ROI from clinical oral images (**Dice: 0.9700**)
 2. **Stage 2 -- Multimodal Classification**: EfficientNetV2-S + SE channel attention + clinical metadata fusion with EMA & weighted label smoothing
 
-### Model Architecture
+### Stage 1: Oral Region Segmentation (Fig.1)
 
-```
-Input: Oral ROI Image (448x448) + Clinical Metadata (5-dim)
-       |                                    |
-       v                                    v
-EfficientNetV2-S (1280d)            MetaMLP (5->128->256)
-       |                                    |
-SE Block (channel recalibration)           |
-       |                                    |
-       +---------- Concat -----------------+
-                       |
-                       v
-              FC (1536->1024->512->256->2)
-                       |
-                       v
-               Benign / Malignant
-```
+ResNet18-UNet encoder-decoder architecture with ImageNet pretrained ResNet18 backbone.
+
+![Fig.1: Oral area segmentation module](results/figures/fig1_architecture.png)
+
+### Stage 2: Multimodal Classification (Fig.2)
+
+Four-submodule architecture: image feature extraction + SE recalibration, metadata encoding, Concatenation fusion, and classification head.
+
+![Fig.2: Multimodal classification network architecture](results/figures/fig2_architecture.png)
 
 ---
 
 ## Results
 
-All tables and figures below correspond to the paper's experimental section.
+All tables and figures below correspond to the paper's experimental section (Section 5).
 
 ### Table 1: Training Configuration
 
@@ -48,6 +41,12 @@ All tables and figures below correspond to the paper's experimental section.
 | Weight Decay | 2x10^-3 |
 | LR Schedule | CosineAnnealingLR |
 | Min Learning Rate | 5x10^-7 |
+
+### Segmentation Results
+
+The segmentation module achieves a mean Dice of **0.9700** on 300 test samples.
+
+![Fig.3: Oral area segmentation visualization](results/figures/fig3_segmentation.png)
 
 ### Table 2: Backbone Comparison
 
