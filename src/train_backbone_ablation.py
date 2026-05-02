@@ -3,7 +3,7 @@
 =====================================
 固定测试集 (15%, seed=42, patient-level stratified) 与所有前序脚本一致。
 
-【对比实验】固定 Img_SE + Concat + build_head_baseline，只换backbone:
+【对比实验】固定 Img_SE + Concat + build_head，只换backbone:
   Backbone_ResNet50      ResNet50       (2048d)
   Backbone_ConvNeXt      ConvNeXt-Tiny  ( 768d)
   Backbone_EffB3         EfficientNet-B3(1536d)
@@ -25,24 +25,29 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from torchvision import models, transforms
 from PIL import Image, ImageFile
 import pandas as pd
 import numpy as np
 from pathlib import Path
 from tqdm import tqdm
-import os, warnings, random, sys
+import os, warnings
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from sklearn.metrics import (classification_report, confusion_matrix,
                              roc_curve, auc, matthews_corrcoef, roc_auc_score)
-from sklearn.model_selection import train_test_split, StratifiedKFold
+# train_test_split, StratifiedKFold — no longer needed (imported via dataset.py)
 import seaborn as sns
 import shutil
 from datetime import datetime
 from collections import deque
+
+from models import SEBlock, MetaMLP, build_head, get_efficientnet_v2s
+from dataset import MultiModalDataset, load_all_data, prepare_splits
+from train_utils import (set_seed, ModelEMA, WeightedLabelSmoothingLoss,
+                         find_threshold, evaluate)
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 warnings.filterwarnings('ignore')
@@ -109,69 +114,7 @@ class Config:
     SMOOTH_WINDOW = 5
 
 
-def set_seed(seed):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark     = False
-
-
-# ==============================================================================
-# 3. EMA
-# ==============================================================================
-class ModelEMA:
-    def __init__(self, model, decay=0.99):
-        self.decay  = decay
-        self.shadow = {n: p.data.clone() for n, p in model.named_parameters()}
-
-    def update(self, model):
-        with torch.no_grad():
-            for n, p in model.named_parameters():
-                self.shadow[n] = (self.decay * self.shadow[n]
-                                  + (1 - self.decay) * p.data)
-
-    def apply_shadow(self, model):
-        self._backup = {n: p.data.clone() for n, p in model.named_parameters()}
-        for n, p in model.named_parameters():
-            p.data.copy_(self.shadow[n])
-
-    def restore(self, model):
-        for n, p in model.named_parameters():
-            p.data.copy_(self._backup[n])
-
-    class _Ctx:
-        def __init__(self, ema, model): self.ema, self.model = ema, model
-        def __enter__(self): self.ema.apply_shadow(self.model); return self.model
-        def __exit__(self, *a): self.ema.restore(self.model)
-
-    def get_context(self, model): return self._Ctx(self, model)
-
-
-# ==============================================================================
-# 4. 损失函数
-# ==============================================================================
-class WeightedLabelSmoothingLoss(nn.Module):
-    def __init__(self, classes=2, smoothing=0.05, dim=-1, weight=None):
-        super().__init__()
-        self.confidence = 1.0 - smoothing
-        self.smoothing  = smoothing
-        self.cls        = classes
-        self.dim        = dim
-        self.weight     = weight
-
-    def forward(self, pred, target):
-        pred = pred.log_softmax(dim=self.dim)
-        with torch.no_grad():
-            true_dist = torch.zeros_like(pred)
-            true_dist.fill_(self.smoothing / (self.cls - 1))
-            true_dist.scatter_(1, target.data.unsqueeze(1), self.confidence)
-        if self.weight is not None:
-            true_dist = true_dist * self.weight.to(pred.device).view(1, -1)
-        return torch.mean(torch.sum(-true_dist * pred, dim=self.dim))
+# set_seed, ModelEMA, WeightedLabelSmoothingLoss — imported from train_utils
 
 
 class WeightedCELoss(nn.Module):
@@ -188,163 +131,14 @@ class WeightedCELoss(nn.Module):
 # ==============================================================================
 # 5. Dataset
 # ==============================================================================
-class MultiModalDataset(Dataset):
-    def __init__(self, data_items, transform=None, return_meta=True):
-        self.data        = data_items
-        self.transform   = transform
-        self.return_meta = return_meta   # False -> 单模态实验
-
-    def __len__(self): return len(self.data)
-
-    def _encode_meta(self, info):
-        feats = []
-        try:
-            feats.append(min(100, max(0, float(info.get('Age', 50)))) / 100.0)
-        except Exception:
-            feats.append(0.5)
-        feats.append(1.0 if str(info.get('Gender')).upper().startswith('M') else 0.0)
-        for k in ['Smoking', 'Chewing_Betel_Quid', 'Alcohol']:
-            feats.append(1.0 if str(info.get(k)).upper() in ['Y', 'YES', '1'] else 0.0)
-        return np.array(feats, dtype=np.float32)
-
-    def __getitem__(self, idx):
-        item = self.data[idx]
-        try:
-            img = Image.open(item['path']).convert('RGB')
-        except Exception:
-            img = Image.new('RGB', (Config.IMG_SIZE, Config.IMG_SIZE))
-        if self.transform:
-            img = self.transform(img)
-        meta  = torch.tensor(self._encode_meta(item['info']), dtype=torch.float32)
-        label = torch.tensor(item['label'], dtype=torch.long)
-        return img, meta, label
-
-
-# ==============================================================================
-# 6. 数据加载与固定划分
-# ==============================================================================
-def load_all_data():
-    print(">>> Loading raw data...")
-    img_dir = Path(Config.CROP_DIR)
-    try:
-        img_df = pd.read_csv(Config.CSV_PATH, encoding='utf-8', engine='python')
-    except Exception:
-        sys.exit("Error: Could not read Imagewise_Data.csv")
-
-    name2label = {}
-    for _, row in img_df.iterrows():
-        name = Path(row['Image Name']).stem
-        cat  = row['Category'].strip()
-        if cat in Config.CLASS_MAP:
-            name2label[name] = Config.CLASS_MAP[cat]
-
-    try:
-        pt_df = pd.read_csv(Config.PATIENT_CSV, encoding='utf-8', engine='python')
-    except Exception:
-        pt_df = pd.read_csv(Config.PATIENT_CSV, encoding='gbk', engine='python')
-    pt_dict = {str(row['Patient ID']).strip(): row for _, row in pt_df.iterrows()}
-
-    patient_data = {}
-    for img_path in tqdm(list(img_dir.glob("*.jpg")), desc="Matching"):
-        fname = img_path.name
-        name  = fname.replace("_oral_only.jpg", "") if "_oral_only.jpg" in fname \
-                else img_path.stem
-        if name not in name2label:
-            continue
-        parts = name.split('-')
-        pid   = f"{parts[0]}-{parts[1]}" if len(parts) >= 2 else name
-        if pid in pt_dict:
-            item = {'path': img_path, 'label': name2label[name], 'info': pt_dict[pid]}
-            patient_data.setdefault(pid, []).append(item)
-
-    total = sum(len(v) for v in patient_data.values())
-    print(f"Loaded {total} images from {len(patient_data)} patients.")
-    return patient_data
-
-
-def prepare_splits(patient_data):
-    pids    = np.array(list(patient_data.keys()))
-    plabels = np.array([patient_data[p][0]['label'] for p in pids])
-
-    tv_pids, test_pids, tv_labels, _ = train_test_split(
-        pids, plabels,
-        test_size=Config.TEST_SIZE,
-        stratify=plabels,
-        random_state=Config.SEED)
-
-    test_data = [item for pid in test_pids for item in patient_data[pid]]
-    tc = np.bincount([x['label'] for x in test_data])
-    print(f"\n  Fixed test set: {len(test_data)} images "
-          f"(Benign={tc[0]}, Malignant={tc[1]})  <-- same as all previous scripts")
-
-    skf   = StratifiedKFold(n_splits=Config.N_FOLDS, shuffle=True,
-                             random_state=Config.SEED)
-    folds = []
-    print(f"\n  5-fold CV splits:")
-    for fold_idx, (tr_idx, va_idx) in enumerate(skf.split(tv_pids, tv_labels)):
-        tr_data = [item for pid in tv_pids[tr_idx] for item in patient_data[pid]]
-        va_data = [item for pid in tv_pids[va_idx] for item in patient_data[pid]]
-        trc = np.bincount([x['label'] for x in tr_data])
-        vac = np.bincount([x['label'] for x in va_data])
-        print(f"    Fold {fold_idx+1}: "
-              f"Train={len(tr_data)}(B={trc[0]},M={trc[1]})  "
-              f"Val={len(va_data)}(B={vac[0]},M={vac[1]})")
-        folds.append((tr_data, va_data))
-
-    return test_data, folds
+# MultiModalDataset, load_all_data, prepare_splits — imported from dataset
 
 
 # ==============================================================================
 # 7. 模型组件 -- 原样复制自架构实验脚本
 # ==============================================================================
 
-class SEBlock(nn.Module):
-    """Squeeze-and-Excitation: 对1D特征做通道重标定"""
-    def __init__(self, dim, reduction=16):
-        super().__init__()
-        self.fc = nn.Sequential(
-            nn.Linear(dim, max(dim // reduction, 8)),
-            nn.ReLU(inplace=True),
-            nn.Linear(max(dim // reduction, 8), dim),
-            nn.Sigmoid()
-        )
-    def forward(self, x):
-        return x * self.fc(x)
-
-
-class MetaMLP_Baseline(nn.Module):
-    """基线: 5->128->256, 带BN"""
-    def __init__(self, meta_dim=5, out_dim=256):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(meta_dim, 128), nn.BatchNorm1d(128),
-            nn.SiLU(inplace=True),    nn.Dropout(0.2),
-            nn.Linear(128, out_dim),  nn.BatchNorm1d(out_dim),
-            nn.SiLU(inplace=True),    nn.Dropout(0.2)
-        )
-    def forward(self, x): return self.net(x)
-
-
-def build_head_baseline(in_dim, num_classes=2):
-    """基线头: in->1024->512->256->2"""
-    return nn.Sequential(
-        nn.Linear(in_dim, 1024), nn.BatchNorm1d(1024),
-        nn.SiLU(inplace=True),   nn.Dropout(0.5),
-        nn.Linear(1024, 512),    nn.BatchNorm1d(512),
-        nn.SiLU(inplace=True),   nn.Dropout(0.4),
-        nn.Linear(512, 256),     nn.BatchNorm1d(256),
-        nn.SiLU(inplace=True),   nn.Dropout(0.3),
-        nn.Linear(256, num_classes)
-    )
-
-
-# ── Backbone 加载函数 ─────────────────────────────────────────────────────────
-
-def get_efficientnet_v2s():
-    m   = models.efficientnet_v2_s(weights='DEFAULT')
-    dim = m.classifier[1].in_features   # 1280
-    m.classifier = nn.Identity()
-    return m, dim
+# SEBlock, MetaMLP (was MetaMLP), build_head, get_efficientnet_v2s — imported from models
 
 def get_resnet50():
     m   = models.resnet50(weights='DEFAULT')
@@ -405,17 +199,17 @@ class BackboneModel(nn.Module):
     """
     对比实验通用模型:
       backbone(各自out_dim) -> SEBlock(out_dim) -> Concat(out_dim+256)
-      MetaMLP_Baseline(5->256)
-      build_head_baseline(out_dim+256)
+      MetaMLP(5->256)
+      build_head(out_dim+256)
     """
     def __init__(self, backbone_name, meta_dim=5, num_classes=2):
         super().__init__()
         loader = BACKBONE_LOADERS[backbone_name]
         self.backbone, img_out = loader()
         self.img_se      = SEBlock(img_out, reduction=16)
-        self.meta_branch = MetaMLP_Baseline(meta_dim, out_dim=256)
+        self.meta_branch = MetaMLP(meta_dim, out_dim=256)
         fusion_dim       = img_out + 256
-        self.classifier  = build_head_baseline(fusion_dim, num_classes)
+        self.classifier  = build_head(fusion_dim, num_classes)
 
     def forward(self, img, meta):
         img_feat  = self.backbone(img)
@@ -450,10 +244,10 @@ class AblationModel(nn.Module):
             self.meta_branch = None
             fusion_dim = img_out                           # 1280d
         else:
-            self.meta_branch = MetaMLP_Baseline(meta_dim, out_dim=256)
+            self.meta_branch = MetaMLP(meta_dim, out_dim=256)
             fusion_dim = img_out + 256                     # 1536d
 
-        self.classifier = build_head_baseline(fusion_dim, num_classes)
+        self.classifier = build_head(fusion_dim, num_classes)
 
     def forward(self, img, meta):
         img_feat = self.backbone(img)
@@ -479,19 +273,7 @@ def build_model(exp_category, exp_variant):
 # ==============================================================================
 # 9. 阈值搜索 & 评估 (新增 macro_f1, macro_precision)
 # ==============================================================================
-def find_threshold(labels, probs):
-    best_score, best_th = 0.0, 0.5
-    labels = np.array(labels)
-    for th in Config.THRESH_RANGE:
-        preds = (probs[:, 1] >= th).astype(int)
-        tp = np.sum((preds == 1) & (labels == 1))
-        tn = np.sum((preds == 0) & (labels == 0))
-        fp = np.sum((preds == 1) & (labels == 0))
-        fn = np.sum((preds == 0) & (labels == 1))
-        bal = (tp / (tp + fn + 1e-6) + tn / (tn + fp + 1e-6)) / 2.0
-        if bal > best_score:
-            best_score, best_th = bal, th
-    return best_th
+# find_threshold, evaluate — imported from train_utils
 
 
 def compute_metrics(labels, preds, probs):
@@ -529,30 +311,7 @@ def compute_metrics(labels, preds, probs):
     }
 
 
-def evaluate(model, loader, criterion, threshold=0.5, tta=False):
-    model.eval()
-    total_loss, all_preds, all_labels, all_probs = 0, [], [], []
-    with torch.no_grad():
-        for img, meta, lbl in loader:
-            img, meta, lbl = img.to(DEVICE), meta.to(DEVICE), lbl.to(DEVICE)
-            if tta:
-                out = (model(img, meta) +
-                       model(torch.flip(img, [3]), meta) +
-                       model(torch.flip(img, [2]), meta)) / 3.0
-            else:
-                out = model(img, meta)
-            if criterion is not None:
-                total_loss += criterion(out, lbl).item() * len(lbl)
-            pb = torch.softmax(out, dim=1)
-            all_probs.extend(pb.cpu().numpy())
-            all_preds.extend((pb[:, 1] >= threshold).long().cpu().numpy())
-            all_labels.extend(lbl.cpu().numpy())
-
-    loss = total_loss / len(loader.dataset) if criterion is not None else 0
-    return (loss,
-            np.array(all_preds),
-            np.array(all_labels),
-            np.array(all_probs))
+# evaluate — imported from train_utils (note: returns acc, loss, preds, labels, probs)
 
 
 # ==============================================================================
@@ -658,15 +417,15 @@ def train_one_fold(fold_idx, exp_name, exp_category, exp_variant,
         use_ema_this_epoch = use_ema and (epoch >= Config.EMA_WARMUP)
         if use_ema_this_epoch:
             with ema.get_context(model):
-                val_loss, val_preds, val_lbls, val_probs = evaluate(
-                    model, val_dl, criterion, threshold=0.5, tta=False)
+                _, val_loss, val_preds, val_lbls, val_probs = evaluate(
+                    model, val_dl, criterion, DEVICE, threshold=0.5, tta=False)
             ema_tag = "EMA"
         else:
-            val_loss, val_preds, val_lbls, val_probs = evaluate(
-                model, val_dl, criterion, threshold=0.5, tta=False)
+            _, val_loss, val_preds, val_lbls, val_probs = evaluate(
+                model, val_dl, criterion, DEVICE, threshold=0.5, tta=False)
             ema_tag = "raw"
 
-        th          = find_threshold(val_lbls, val_probs)
+        th          = find_threshold(val_lbls, val_probs, Config.THRESH_RANGE)
         final_preds = (val_probs[:, 1] >= th).astype(int)
         acc  = np.mean(final_preds == val_lbls)
         f1   = classification_report(val_lbls, final_preds,
@@ -725,8 +484,8 @@ def train_one_fold(fold_idx, exp_name, exp_category, exp_variant,
           f"(EMA={'yes' if ckpt['ema_used'] else 'no'}, thr={th_final:.2f})")
     print(f"  Evaluating on FIXED test set (TTA={Config.USE_TTA})...")
 
-    _, preds, test_lbls, test_probs = evaluate(
-        model, test_dl, criterion, threshold=th_final, tta=Config.USE_TTA)
+    _, _, preds, test_lbls, test_probs = evaluate(
+        model, test_dl, criterion, DEVICE, threshold=th_final, tta=Config.USE_TTA)
 
     m = compute_metrics(test_lbls, preds, test_probs)
     print(f"\n  [Fold{fold_idx+1}|{exp_name}]")
@@ -1167,9 +926,11 @@ def main():
         shutil.rmtree(Config.SAVE_ROOT)
     Path(Config.SAVE_ROOT).mkdir(parents=True, exist_ok=True)
 
-    patient_data = load_all_data()
+    patient_data = load_all_data(
+        Config.CROP_DIR, Config.CSV_PATH, Config.PATIENT_CSV, Config.CLASS_MAP)
     print(f"\n>>> Preparing fixed test set + {Config.N_FOLDS}-fold CV...")
-    test_data, folds = prepare_splits(patient_data)
+    test_data, folds = prepare_splits(
+        patient_data, Config.TEST_SIZE, Config.N_FOLDS, Config.SEED)
 
     all_exp_results = {}
 
@@ -1180,9 +941,9 @@ def main():
             lbl = BACKBONE_LABELS.get(exp_variant, exp_variant)
             print(f"  Backbone : {lbl}")
             print(f"  Img SE   : SEBlock(img_out, reduction=16)")
-            print(f"  Meta     : MetaMLP_Baseline(5->128->256)")
+            print(f"  Meta     : MetaMLP(5->128->256)")
             print(f"  Fusion   : Concat(img_se_out, meta_out)")
-            print(f"  Head     : build_head_baseline")
+            print(f"  Head     : build_head")
         else:
             print(f"  Ablation : {exp_variant}")
             if exp_variant == 'unimodal':
@@ -1247,7 +1008,7 @@ def main():
         f"Test set: fixed {Config.TEST_SIZE*100:.0f}% holdout ({len(test_data)} images)",
         f"TTA     : {Config.USE_TTA}",
         "",
-        "【对比实验】固定: Img_SE + Concat + build_head_baseline",
+        "【对比实验】固定: Img_SE + Concat + build_head",
         "  Backbone_ResNet50      : ResNet50(2048d)       + SE + MLP + Concat(2304d) + head",
         "  Backbone_ConvNeXt      : ConvNeXt-Tiny(768d)   + SE + MLP + Concat(1024d) + head",
         "  Backbone_EffB3         : EfficientNet-B3(1536d) + SE + MLP + Concat(1792d) + head",

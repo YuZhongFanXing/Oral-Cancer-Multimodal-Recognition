@@ -235,7 +235,7 @@ Without SE attention, model activation is scattered across background regions in
 4. **Reproduce tables**: Run `train_backbone_ablation.py` (Tables 2 & 4), `train_fusion_innovation.py` (Table 3), and `train_meta_only.py` (Table 4 metadata row).
 5. All scripts auto-save per-fold checkpoints, training curves, confusion matrices, and ROC curves.
 
-**Note**: `train_img_se_baseline.py` imports from the shared modules (`models.py`, `dataset.py`, `train_utils.py`). The other experiment scripts are standalone and self-contained to ensure exact reproducibility of the original experimental runs.
+**Note**: All experiment scripts import shared components from `models.py`, `dataset.py`, and `train_utils.py` to eliminate code duplication while maintaining reproducibility.
 
 ---
 

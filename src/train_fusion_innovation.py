@@ -46,13 +46,13 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 from tqdm import tqdm
-import os, warnings, random, sys
+import os, warnings
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from sklearn.metrics import (classification_report, confusion_matrix,
                              roc_curve, auc, matthews_corrcoef, roc_auc_score)
-from sklearn.model_selection import train_test_split, StratifiedKFold
+# train_test_split, StratifiedKFold — no longer needed (imported via dataset.py)
 import seaborn as sns
 import shutil
 from datetime import datetime
@@ -60,6 +60,11 @@ from collections import deque
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 warnings.filterwarnings('ignore')
+
+from models import SEBlock, MetaMLP, build_head, get_efficientnet_v2s
+from dataset import load_all_data, prepare_splits
+from train_utils import (set_seed, ModelEMA, WeightedLabelSmoothingLoss,
+                         find_threshold)
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"[{datetime.now().strftime('%H:%M:%S')}] Device: {DEVICE}")
@@ -126,69 +131,7 @@ class Config:
     AUX_WEIGHT = 0.3
 
 
-def set_seed(seed):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark     = False
-
-
-# ==============================================================================
-# 3. EMA
-# ==============================================================================
-class ModelEMA:
-    def __init__(self, model, decay=0.99):
-        self.decay  = decay
-        self.shadow = {n: p.data.clone() for n, p in model.named_parameters()}
-
-    def update(self, model):
-        with torch.no_grad():
-            for n, p in model.named_parameters():
-                self.shadow[n] = (self.decay * self.shadow[n]
-                                  + (1 - self.decay) * p.data)
-
-    def apply_shadow(self, model):
-        self._backup = {n: p.data.clone() for n, p in model.named_parameters()}
-        for n, p in model.named_parameters():
-            p.data.copy_(self.shadow[n])
-
-    def restore(self, model):
-        for n, p in model.named_parameters():
-            p.data.copy_(self._backup[n])
-
-    class _Ctx:
-        def __init__(self, ema, model): self.ema, self.model = ema, model
-        def __enter__(self): self.ema.apply_shadow(self.model); return self.model
-        def __exit__(self, *a): self.ema.restore(self.model)
-
-    def get_context(self, model): return self._Ctx(self, model)
-
-
-# ==============================================================================
-# 4. 损失函数
-# ==============================================================================
-class WeightedLabelSmoothingLoss(nn.Module):
-    def __init__(self, classes=2, smoothing=0.05, dim=-1, weight=None):
-        super().__init__()
-        self.confidence = 1.0 - smoothing
-        self.smoothing  = smoothing
-        self.cls        = classes
-        self.dim        = dim
-        self.weight     = weight
-
-    def forward(self, pred, target):
-        pred = pred.log_softmax(dim=self.dim)
-        with torch.no_grad():
-            true_dist = torch.zeros_like(pred)
-            true_dist.fill_(self.smoothing / (self.cls - 1))
-            true_dist.scatter_(1, target.data.unsqueeze(1), self.confidence)
-        if self.weight is not None:
-            true_dist = true_dist * self.weight.to(pred.device).view(1, -1)
-        return torch.mean(torch.sum(-true_dist * pred, dim=self.dim))
+# set_seed, ModelEMA, WeightedLabelSmoothingLoss — imported from train_utils
 
 
 # ==============================================================================
@@ -238,114 +181,14 @@ class MultiModalDataset(Dataset):
 # ==============================================================================
 # 6. 数据加载与固定划分（参数与所有前序脚本完全一致）
 # ==============================================================================
-def load_all_data():
-    print(">>> Loading raw data...")
-    img_dir = Path(Config.CROP_DIR)
-    try:
-        img_df = pd.read_csv(Config.CSV_PATH, encoding='utf-8', engine='python')
-    except Exception:
-        sys.exit("Error: Could not read Imagewise_Data.csv")
-
-    name2label = {}
-    for _, row in img_df.iterrows():
-        name = Path(row['Image Name']).stem
-        cat  = row['Category'].strip()
-        if cat in Config.CLASS_MAP:
-            name2label[name] = Config.CLASS_MAP[cat]
-
-    try:
-        pt_df = pd.read_csv(Config.PATIENT_CSV, encoding='utf-8', engine='python')
-    except Exception:
-        pt_df = pd.read_csv(Config.PATIENT_CSV, encoding='gbk', engine='python')
-    pt_dict = {str(row['Patient ID']).strip(): row for _, row in pt_df.iterrows()}
-
-    patient_data = {}
-    for img_path in tqdm(list(img_dir.glob("*.jpg")), desc="Matching"):
-        fname = img_path.name
-        name  = fname.replace("_oral_only.jpg", "") if "_oral_only.jpg" in fname \
-                else img_path.stem
-        if name not in name2label:
-            continue
-        parts = name.split('-')
-        pid   = f"{parts[0]}-{parts[1]}" if len(parts) >= 2 else name
-        if pid in pt_dict:
-            item = {'path': img_path, 'label': name2label[name], 'info': pt_dict[pid]}
-            patient_data.setdefault(pid, []).append(item)
-
-    total = sum(len(v) for v in patient_data.values())
-    print(f"Loaded {total} images from {len(patient_data)} patients.")
-    return patient_data
-
-
-def prepare_splits(patient_data):
-    pids    = np.array(list(patient_data.keys()))
-    plabels = np.array([patient_data[p][0]['label'] for p in pids])
-
-    tv_pids, test_pids, tv_labels, _ = train_test_split(
-        pids, plabels,
-        test_size=Config.TEST_SIZE,
-        stratify=plabels,
-        random_state=Config.SEED)
-
-    test_data = [item for pid in test_pids for item in patient_data[pid]]
-    tc = np.bincount([x['label'] for x in test_data])
-    print(f"\n  Fixed test set: {len(test_data)} images "
-          f"(Benign={tc[0]}, Malignant={tc[1]})  <-- same as all previous scripts")
-
-    skf   = StratifiedKFold(n_splits=Config.N_FOLDS, shuffle=True,
-                             random_state=Config.SEED)
-    folds = []
-    print(f"\n  5-fold CV splits:")
-    for fold_idx, (tr_idx, va_idx) in enumerate(skf.split(tv_pids, tv_labels)):
-        tr_data = [item for pid in tv_pids[tr_idx] for item in patient_data[pid]]
-        va_data = [item for pid in tv_pids[va_idx] for item in patient_data[pid]]
-        trc = np.bincount([x['label'] for x in tr_data])
-        vac = np.bincount([x['label'] for x in va_data])
-        print(f"    Fold {fold_idx+1}: "
-              f"Train={len(tr_data)}(B={trc[0]},M={trc[1]})  "
-              f"Val={len(va_data)}(B={vac[0]},M={vac[1]})")
-        folds.append((tr_data, va_data))
-
-    return test_data, folds
+# load_all_data, prepare_splits — imported from dataset
 
 
 # ==============================================================================
 # 7. 网络架构组件
 # ==============================================================================
 
-def get_efficientnet_v2s():
-    m   = models.efficientnet_v2_s(weights='DEFAULT')
-    dim = m.classifier[1].in_features
-    m.classifier = nn.Identity()
-    return m, dim
-
-
-# ── Meta MLP（所有实验共享） ──────────────────────────────────────────────────
-class MetaMLP_Baseline(nn.Module):
-    def __init__(self, meta_dim=5, out_dim=256):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(meta_dim, 128), nn.BatchNorm1d(128),
-            nn.SiLU(inplace=True),    nn.Dropout(0.2),
-            nn.Linear(128, out_dim),  nn.BatchNorm1d(out_dim),
-            nn.SiLU(inplace=True),    nn.Dropout(0.2)
-        )
-    def forward(self, x): return self.net(x)
-
-
-# ── [A][C] 标准 img_SE（与前序脚本完全一致） ─────────────────────────────────
-class SEBlock(nn.Module):
-    """图像特征自校准：gate 仅由图像自身决定"""
-    def __init__(self, dim, reduction=16):
-        super().__init__()
-        self.fc = nn.Sequential(
-            nn.Linear(dim, max(dim // reduction, 8)),
-            nn.ReLU(inplace=True),
-            nn.Linear(max(dim // reduction, 8), dim),
-            nn.Sigmoid()
-        )
-    def forward(self, x):
-        return x * self.fc(x)
+# get_efficientnet_v2s, MetaMLP (was MetaMLP), SEBlock — imported from models
 
 
 # ── [B][D] Meta-Conditioned SE ────────────────────────────────────────────────
@@ -457,18 +300,7 @@ class BidirectionalCrossModalAttention(nn.Module):
         return self.ffn(torch.cat([io, mo], dim=1))  # (B, 512)
 
 
-# ── 共用分类头 ────────────────────────────────────────────────────────────────
-def build_head_baseline(in_dim, num_classes=2):
-    return nn.Sequential(
-        nn.Linear(in_dim, 1024), nn.BatchNorm1d(1024),
-        nn.SiLU(inplace=True),   nn.Dropout(0.5),
-        nn.Linear(1024, 512),    nn.BatchNorm1d(512),
-        nn.SiLU(inplace=True),   nn.Dropout(0.4),
-        nn.Linear(512, 256),     nn.BatchNorm1d(256),
-        nn.SiLU(inplace=True),   nn.Dropout(0.3),
-        nn.Linear(256, num_classes)
-    )
-
+# build_head (was build_head) — imported from models
 
 def build_head_crossattn(in_dim=512, num_classes=2):
     """CrossAttn输出512d，头结构对应缩小"""
@@ -508,7 +340,7 @@ class FusionModel(nn.Module):
             self.img_se = SEBlock(img_out, reduction=16)
 
         # ── meta branch ───────────────────────────────────────────────────────
-        self.meta_branch = MetaMLP_Baseline(meta_dim, out_dim=META_OUT)
+        self.meta_branch = MetaMLP(meta_dim, out_dim=META_OUT)
 
         # ── 辅助任务头 ────────────────────────────────────────────────────────
         if self.use_aux:
@@ -528,7 +360,7 @@ class FusionModel(nn.Module):
         else:
             # Concat → baseline head
             concat_dim      = img_out + META_OUT             # 1536
-            self.classifier = build_head_baseline(concat_dim, num_classes)
+            self.classifier = build_head(concat_dim, num_classes)
 
     def forward(self, img, meta):
         img_feat = self.backbone(img)                        # (B, 1280)
@@ -563,19 +395,7 @@ class FusionModel(nn.Module):
 # ==============================================================================
 # 9. 阈值搜索 & 评估
 # ==============================================================================
-def find_threshold(labels, probs):
-    best_score, best_th = 0.0, 0.5
-    labels = np.array(labels)
-    for th in Config.THRESH_RANGE:
-        preds = (probs[:, 1] >= th).astype(int)
-        tp = np.sum((preds == 1) & (labels == 1))
-        tn = np.sum((preds == 0) & (labels == 0))
-        fp = np.sum((preds == 1) & (labels == 0))
-        fn = np.sum((preds == 0) & (labels == 1))
-        bal = (tp / (tp + fn + 1e-6) + tn / (tn + fp + 1e-6)) / 2.0
-        if bal > best_score:
-            best_score, best_th = bal, th
-    return best_th
+# find_threshold — imported from train_utils
 
 
 def evaluate(model, loader, criterion, threshold=0.5, tta=False):
@@ -722,7 +542,7 @@ def train_one_fold(fold_idx, exp_name, arch_type,
                     model, val_dl, criterion, threshold=0.5, tta=False)
             ema_tag = "EMA"
 
-        th          = find_threshold(val_lbls, val_probs)
+        th          = find_threshold(val_lbls, val_probs, Config.THRESH_RANGE)
         final_preds = (val_probs[:, 1] >= th).astype(int)
         acc  = np.mean(final_preds == val_lbls)
         f1   = classification_report(val_lbls, final_preds,
@@ -942,9 +762,11 @@ def main():
         shutil.rmtree(Config.SAVE_ROOT)
     Path(Config.SAVE_ROOT).mkdir(parents=True, exist_ok=True)
 
-    patient_data = load_all_data()
+    patient_data = load_all_data(
+        Config.CROP_DIR, Config.CSV_PATH, Config.PATIENT_CSV, Config.CLASS_MAP)
     print(f"\n>>> Preparing fixed test set + {Config.N_FOLDS}-fold CV...")
-    test_data, folds = prepare_splits(patient_data)
+    test_data, folds = prepare_splits(
+        patient_data, Config.TEST_SIZE, Config.N_FOLDS, Config.SEED)
 
     metrics      = ['test_acc', 'test_sens', 'test_spec',
                     'test_bal', 'test_mcc',  'test_auc']
