@@ -1,29 +1,97 @@
 # Multimodal Recognition of Oral Cancer Integrating SE Attention and Metadata
 
-## Overview
+> 侯宇欣, 徐睿杰, 韩俊杰, 赵奎璋, 查鑫悦, 张琥, 吴贯锋. 融合SE注意力与元数据的口腔癌多模态识别[J].
 
-A two-stage multimodal diagnostic pipeline for oral cancer screening:
+## Abstract
 
-1. **Stage 1 -- Oral Region Segmentation**: ResNet18-UNet extracts stable ROI from clinical oral images (**Dice: 0.9700**)
-2. **Stage 2 -- Multimodal Classification**: EfficientNetV2-S + SE channel attention + clinical metadata fusion with EMA & weighted label smoothing
+A two-stage multimodal diagnostic pipeline for oral cancer screening. Stage 1 uses **ResNet18-UNet** to extract the oral region of interest (ROI) from clinical images, achieving a mean **Dice of 0.9700**. Stage 2 employs **EfficientNetV2-S** with a **Squeeze-and-Excitation (SE)** channel recalibration module for image feature extraction, fused with structured clinical metadata (age, gender, smoking, betel quid chewing, alcohol use) via **Concatenation**. Training is stabilized with **Exponential Moving Average (EMA)** and **Weighted Label Smoothing** loss.
 
-### Stage 1: Oral Region Segmentation (Fig.1)
-
-ResNet18-UNet encoder-decoder architecture with ImageNet pretrained ResNet18 backbone.
-
-![Fig.1: Oral area segmentation module](results/figures/fig1_architecture.png)
-
-### Stage 2: Multimodal Classification (Fig.2)
-
-Four-submodule architecture: image feature extraction + SE recalibration, metadata encoding, Concatenation fusion, and classification head.
-
-![Fig.2: Multimodal classification network architecture](results/figures/fig2_architecture.png)
+On an independent test set under patient-level 5-fold cross-validation, the full model achieves **Accuracy 0.8281**, **Macro F1 0.7969**, **MCC 0.5944**, and **AUC 0.8712**, outperforming the baseline method by 1.81%, 1.69%, and 2.44% in accuracy, macro F1, and MCC respectively.
 
 ---
 
-## Results
+## Method
 
-All tables and figures below correspond to the paper's experimental section (Section 5).
+### Overall Pipeline
+
+```
+Raw Oral Image (any size) + Clinical Metadata (5-dim)
+        |                          |
+        v                          |
+Stage 1: ResNet18-UNet             |
+  - Multi-scale feature extraction |
+  - Skip-connection fusion         |
+  - Sigmoid output (256x256 mask)  |
+        |                          |
+        v                          |
+ROI Preprocessing:                 |
+  - Mask x Image -> oral ROI       |
+  - Resize to 448x448              |
+  - ImageNet normalization         |
+        |                          |
+        v                          v
+Stage 2: Multimodal Classification (see Fig.2 below)
+        |
+        v
+  Benign / Malignant
+```
+
+### Stage 1: Oral Region Segmentation
+
+ResNet18-UNet encoder-decoder with ImageNet-pretrained ResNet18 backbone. The encoder captures multi-scale features through 5 downsampling stages; the decoder restores spatial detail via bilinear upsampling and skip connections. Trained with **Dice-BCE** combined loss to address foreground-background class imbalance.
+
+![Fig.1: Oral area segmentation module](results/figures/fig1_architecture.png)
+
+### Stage 2: Multimodal Classification
+
+Four submodules:
+
+1. **Image Feature Extraction + SE Recalibration**: EfficientNetV2-S (1280d output) followed by SEBlock that applies channel-wise gating — `x_out = x * sigmoid(FC(ReLU(FC(x))))` — to emphasize diagnostically relevant feature dimensions.
+2. **Metadata Encoding**: MetaMLP (5->128->256 with BatchNorm + SiLU + Dropout) maps the 5-dim clinical vector to a 256-dim representation.
+3. **Fusion**: Concatenation combines image features (1280d) and metadata features (256d) into a joint 1536-dim representation.
+4. **Classification Head**: FC (1536->1024->512->256->2) with BatchNorm + SiLU + Dropout produces the benign/malignant logits.
+
+Unlike the original SE module designed for 2D feature maps, our SE operates directly on the 1D global feature vector from EfficientNetV2-S, requiring no global average pooling.
+
+![Fig.2: Multimodal classification network architecture](results/figures/fig2_architecture.png)
+
+### Training Strategy
+
+**Weighted Label Smoothing Loss** (Eq. 8-9 in paper):
+
+Given class imbalance (benign >> malignant), class weights `w = [2.0, 1.0]` penalize benign misclassification more heavily. Label smoothing (`smoothing = 0.05`) converts hard one-hot targets to soft targets, preventing overconfidence:
+
+```
+L = -mean( sum( true_dist * log_softmax(pred), dim=1 ) )
+```
+where `true_dist = (1-smoothing) * one_hot + smoothing/(C-1)`, weighted by class weights.
+
+**Exponential Moving Average (EMA)**:
+
+Shadow weights are maintained with `decay = 0.99`, updated each optimizer step. The first 5 epochs serve as a warmup period without EMA updates. At inference time (and validation after warmup), shadow weights replace model weights to reduce parameter variance.
+
+**Optimization**: AdamW (`lr=2e-4`, `wd=2e-3`) + CosineAnnealingLR (`T_max=100`, `eta_min=5e-7`). Gradient clipping at `max_norm=2.0`. Gradient accumulation over 3 steps yields an effective batch size of 48.
+
+---
+
+## Experimental Setup
+
+### Dataset
+
+The **Dataset of Annotated Oral Cavity Images for Oral Cancer Detection** by Piyarathne et al. (2024) contains ~3,000 clinical oral cavity images with:
+- Oral region and lesion segmentation annotations
+- Patient metadata: Age, Gender, Smoking, Chewing Betel Quid, Alcohol
+- Three original categories: Benign, OPMD (Oral Potentially Malignant Disorders), OCA (Oral Cancer)
+
+OPMD and OCA are merged into a single **Malignant** class for binary classification.
+
+**Images are not included** in this repository. Obtain from:
+
+> Piyarathne N S, Liyanage S N, Rasnayaka R M S G K, et al. A comprehensive dataset of annotated oral cavity images for diagnosis of oral cancer and oral potentially malignant disorders[J]. Oral Oncology, 2024, 156: 106946.
+
+### Data Split
+
+**Patient-level stratified sampling**: 15% of patients held out as a fixed test set; remaining 85% split into 5 folds with stratification. This prevents data leakage where multiple images from the same patient appear in both train and test sets.
 
 ### Table 1: Training Configuration
 
@@ -33,22 +101,50 @@ All tables and figures below correspond to the paper's experimental section (Sec
 | Random Seed | 42 |
 | Input Image Size | 448 x 448 |
 | Batch Size | 16 |
-| Gradient Accumulation | 3 |
+| Gradient Accumulation Steps | 3 |
 | Max Epochs | 100 |
 | Early Stop Patience | 20 |
 | Optimizer | AdamW |
-| Initial Learning Rate | 2x10^-4 |
-| Weight Decay | 2x10^-3 |
+| Initial Learning Rate | 2 x 10^-4 |
+| Weight Decay | 2 x 10^-3 |
 | LR Schedule | CosineAnnealingLR |
-| Min Learning Rate | 5x10^-7 |
+| Min Learning Rate | 5 x 10^-7 |
+| EMA Decay | 0.99 |
+| EMA Warmup Epochs | 5 |
+| Label Smoothing | 0.05 |
+| Class Weights | [2.0, 1.0] |
+
+### Data Augmentation
+
+Training only: Random H/V flip (p=0.5), rotation (+-20 deg), affine translation (0.1) and scale (0.9-1.1), color jitter (brightness 0.2, contrast 0.2, saturation 0.15, hue 0.05), random grayscale (p=0.1).
+
+### Evaluation Metrics
+
+- **Accuracy**: overall correct predictions
+- **Precision / Recall**: malignant-class precision and sensitivity
+- **Macro F1**: harmonic mean of macro-averaged precision and recall
+- **MCC** (Matthews Correlation Coefficient): robust to class imbalance
+- **AUC**: area under the ROC curve, threshold-independent ranking quality
+
+### Inference
+
+**Threshold search** over [0.15, 0.95] maximizes balanced accuracy on validation set. **TTA**: 3-way flip averaging (original, horizontal flip, vertical flip) at test time.
+
+---
+
+## Results
+
+Experiments follow the progressive logic: **backbone selection -> fusion strategy -> ablation analysis**.
 
 ### Segmentation Results
 
-The segmentation module achieves a mean Dice of **0.9700** on 300 test samples.
+ResNet18-UNet achieves mean Dice = **0.9700** on 300 test samples, validating that predicted masks align closely with expert annotations even under boundary complexity and variable imaging conditions.
 
 ![Fig.3: Oral area segmentation visualization](results/figures/fig3_segmentation.png)
 
 ### Table 2: Backbone Comparison
+
+Fixed configuration: SE attention + MetaMLP + Concat fusion. Only the image backbone varies.
 
 | Backbone | Accuracy | Precision | Recall | Macro F1 | MCC | AUC |
 |---|---|---|---|---|---|---|
@@ -57,11 +153,15 @@ The segmentation module achieves a mean Dice of **0.9700** on 300 test samples.
 | DenseNet121 | 0.8012 +- 0.0215 | 0.8745 +- 0.0130 | 0.8366 +- 0.0380 | 0.7698 +- 0.0203 | 0.5435 +- 0.0388 | 0.8563 +- 0.0182 |
 | MobileNetV3-Large | 0.7956 +- 0.0100 | 0.8709 +- 0.0248 | 0.8339 +- 0.0453 | 0.7617 +- 0.0106 | 0.5312 +- 0.0184 | 0.8491 +- 0.0102 |
 | ConvNeXt-Tiny | 0.7919 +- 0.0305 | 0.8808 +- 0.0152 | 0.8143 +- 0.0660 | 0.7632 +- 0.0236 | 0.5377 +- 0.0352 | 0.8469 +- 0.0136 |
-| ResNet50 | 0.7900 +- 0.0280 | 0.8716 +- 0.0175 | 0.8223 +- 0.0577 | 0.7585 +- 0.0235 | 0.5259 +- 0.0488 | 0.8450 +- 0.0182 |
+| ResNet50 | 0.7900 +- 0.0280 | 0.8716 +- 0.0175 | 0.8223 +- 0.0577 | 0.7585 +- 0.0235 | 0.5259 +- 0.0488 | 0.8450 +- 0.0102 |
+
+**Finding**: EfficientNetV2-S achieves the best overall performance. While EfficientNet-B3 has marginally higher Recall (0.8857), its Accuracy and MCC drop noticeably, indicating a precision-recall trade-off. EfficientNetV2-S is selected as the default backbone for all subsequent experiments.
 
 ![Fig.4: ROC Backbone Comparison](results/figures/roc_backbone_replot.png)
 
 ### Table 3: Fusion Strategy Comparison
+
+Fixed EfficientNetV2-S backbone. Five fusion strategies compared.
 
 | Fusion Method | Accuracy | Precision | Recall | Macro F1 | MCC | AUC |
 |---|---|---|---|---|---|---|
@@ -71,7 +171,11 @@ The segmentation module achieves a mean Dice of **0.9700** on 300 test samples.
 | Bidirectional Cross-Attention | 0.8044 +- 0.0127 | 0.8859 +- 0.0117 | 0.8277 +- 0.0323 | 0.7762 +- 0.0095 | 0.5585 +- 0.0174 | 0.8629 +- 0.0152 |
 | Element-wise Addition | 0.7981 +- 0.0200 | 0.8825 +- 0.0218 | 0.8232 +- 0.0548 | 0.7687 +- 0.0144 | 0.5470 +- 0.0212 | 0.8485 +- 0.0126 |
 
+**Finding**: Simple Concatenation achieves the best overall performance. While Multi-Task Learning yields the highest AUC (0.8742), its Accuracy and MCC are lower. Gated Fusion shows competitive MCC (0.5888) and AUC (0.8728) but does not surpass Concat. Element-wise Addition performs worst, suggesting that lossless feature preservation is important for this task.
+
 ### Table 4: Ablation Study
+
+Each component of the full model is removed to measure its independent contribution.
 
 | Experiment | Accuracy | Precision | Recall | Macro F1 | MCC | AUC |
 |---|---|---|---|---|---|---|
@@ -82,11 +186,17 @@ The segmentation module achieves a mean Dice of **0.9700** on 300 test samples.
 | Unimodal (Image Only) | 0.7531 +- 0.0420 | 0.8626 +- 0.0245 | 0.7723 +- 0.0811 | 0.7226 +- 0.0352 | 0.4627 +- 0.0564 | 0.8273 +- 0.0279 |
 | Unimodal (Metadata Only) | 0.7687 +- 0.0551 | 0.8606 +- 0.0133 | 0.8000 +- 0.0970 | 0.7371 +- 0.0474 | 0.4888 +- 0.0837 | 0.8188 +- 0.0115 |
 
+**Finding**:
+- **Label Smoothing** contributes +1.56pp Accuracy and +2.03pp MCC over plain weighted CE.
+- **SE Block** contributes +2.25pp Accuracy and +3.93pp MCC, confirming that channel recalibration improves lesion feature discrimination.
+- **EMA** has the largest single-component impact: removing it causes a -4.56pp Accuracy and -7.38pp MCC drop, demonstrating its critical role in training stability.
+- **Multimodal fusion** provides substantial gains: Image-only drops to 0.7531 Accuracy, Metadata-only to 0.7687, vs. 0.8281 for the full multimodal model.
+
 ![Fig.5: ROC Ablation Comparison](results/figures/roc_ablation_replot.png)
 
-### Fig.6: Grad-CAM Visualization
+### Grad-CAM Visualization (Fig.6)
 
-SE channel attention concentrates activation on lesion regions, suppressing background noise.
+Without SE attention, model activation is scattered across background regions including normal mucosa. With SE channel recalibration, activation concentrates precisely on ground-truth lesion areas, with background noise significantly suppressed.
 
 ![Fig.6: Grad-CAM Overview](results/figures/gradcam_overview.png)
 
@@ -97,59 +207,56 @@ SE channel attention concentrates activation on lesion regions, suppressing back
 ## Repository Structure
 
 ```
-├── data/                          # Metadata CSVs (images not included)
+├── data/
+│   ├── Imagewise_Data.csv           # Per-image annotations and categories
+│   ├── Patientwise_Data.csv         # Per-patient metadata (5 clinical factors)
+│   └── README.md                    # Data documentation and class mapping
 ├── src/
-│   ├── models.py                  # ImgSEModel, SEBlock, MetaMLP, build_head
-│   ├── dataset.py                 # MultiModalDataset, data loading & splitting
-│   ├── train_utils.py             # ModelEMA, WeightedLabelSmoothingLoss, evaluate
-│   ├── segmentation.py            # Stage 1: ResNet18-UNet oral segmentation
-│   ├── train_img_se_baseline.py   # Stage 2: ImgSE baseline (MAIN script)
-│   ├── train_backbone_ablation.py # Table 2 backbone comparison + Table 4 ablation
-│   ├── train_fusion_innovation.py # Table 3 fusion strategy comparison
-│   └── train_meta_only.py         # Table 4 metadata-only model
+│   ├── models.py                    # ImgSEModel, SEBlock, MetaMLP, build_head
+│   ├── dataset.py                   # MultiModalDataset, load_all_data, prepare_splits
+│   ├── train_utils.py               # ModelEMA, WeightedLabelSmoothingLoss, evaluate
+│   ├── segmentation.py              # Stage 1: ResNet18-UNet training & evaluation
+│   ├── train_img_se_baseline.py     # Stage 2: Main baseline (Full Model)
+│   ├── train_backbone_ablation.py   # Table 2 backbone comparison + Table 4 ablation
+│   ├── train_fusion_innovation.py   # Table 3 fusion strategy comparison
+│   └── train_meta_only.py           # Table 4 metadata-only baseline
 ├── results/
-│   ├── tables/                    # Per-fold CSV results
-│   └── figures/                   # Paper figures (Fig.4-6)
-└── requirements.txt
+│   ├── tables/                      # Per-fold CSV metrics for all experiments
+│   └── figures/                     # Paper figures (Fig.1 through Fig.6)
+├── requirements.txt
+└── README.md
 ```
 
-### Code Logic
+### How to Run
 
-The experiments follow the paper's progressive logic: **backbone → fusion → ablation**.
+1. **Obtain the dataset** from Piyarathne et al. (2024) and place images + CSVs in the expected directories.
+2. **Stage 1**: Run `segmentation.py` to train the oral ROI extraction model and generate segmented images.
+3. **Stage 2 (main)**: Run `train_img_se_baseline.py` for the full multimodal model with 5-fold CV.
+4. **Reproduce tables**: Run `train_backbone_ablation.py` (Tables 2 & 4), `train_fusion_innovation.py` (Table 3), and `train_meta_only.py` (Table 4 metadata row).
+5. All scripts auto-save per-fold checkpoints, training curves, confusion matrices, and ROC curves.
 
-1. **`segmentation.py`** — Run first. Trains ResNet18-UNet to extract oral ROI from raw clinical images (Dice 0.9700). Outputs segmented images for Stage 2.
-2. **`train_img_se_baseline.py`** — The core baseline. Implements the full model: EfficientNetV2-S + SE + MetaMLP + Concat fusion + EMA + Weighted Label Smoothing. This is the paper's main contribution.
-3. **`train_backbone_ablation.py`** — Reproduces Table 2 (6 backbone variants) and Table 4 rows 1-5 (NoSE, NoEMA, WCE, Image-only ablations).
-4. **`train_fusion_innovation.py`** — Reproduces Table 3 (Concat, Multi-Task, Cross-Attention fusion strategies).
-5. **`train_meta_only.py`** — Reproduces Table 4 row 6 (Metadata-only baseline).
-
-Shared modules (`models.py`, `dataset.py`, `train_utils.py`) are extracted from the baseline and imported by all experiment scripts.
+**Note**: `train_img_se_baseline.py` imports from the shared modules (`models.py`, `dataset.py`, `train_utils.py`). The other experiment scripts are standalone and self-contained to ensure exact reproducibility of the original experimental runs.
 
 ---
 
-## Training Strategy
+## Key Design Decisions
 
-- **Loss**: Weighted Label Smoothing (w=[2,1], smoothing=0.05)
-- **EMA**: decay=0.99, warmup=5 epochs
-- **Optimizer**: AdamW (lr=2e-4, wd=2e-3) + CosineAnnealingLR
-- **Early Stopping**: patience=20, smooth_window=5
-- **Data Split**: Patient-level stratified, 15% holdout test set, 5-fold CV
-- **Augmentation**: Random H/V flip, rotation (+-20 deg), affine, color jitter, grayscale
-- **TTA**: 3-way flip averaging at inference
+| Decision | Rationale | Evidence |
+|---|---|---|
+| SE on 1D features (not 2D) | EfficientNetV2-S already global-pooled; no GAP needed | +3.93pp MCC vs. No-SE |
+| Concat fusion (not gated/attention) | Lossless; keeps both modalities intact | Best overall in Table 3 |
+| EMA + Label Smoothing | Stabilizes training under class imbalance | -7.38pp MCC without EMA |
+| Patient-level split | Prevents same-patient leakage across train/test | More reliable generalization estimate |
+| OPMD + OCA -> Malignant | Clinical rationale; binary screening task | Consistent with Devindi et al. baseline |
 
 ---
 
-## Dataset
+## Limitations (from paper discussion)
 
-This project uses the **Dataset of Annotated Oral Cavity Images for Oral Cancer Detection** by Piyarathne et al. (2024):
-
-- 3,000 clinical oral cavity images (Benign / OPMD / Oral Cancer)
-- Oral region & lesion segmentation annotations
-- Patient metadata: Age, Gender, Smoking, Chewing Betel Quid, Alcohol
-
-**Images are not included** in this repository. Obtain the original dataset from:
-
-> Piyarathne N S, Liyanage S N, Rasnayaka R M S G K, et al. A comprehensive dataset of annotated oral cavity images for diagnosis of oral cancer and oral potentially malignant disorders[J]. Oral Oncology, 2024, 156: 106946.
+- Concat fusion performs only shallow feature concatenation without deep semantic interaction between modalities.
+- Binary classification (benign/malignant) does not distinguish OPMD from invasive carcinoma.
+- Model has not been optimized for lightweight deployment (EfficientNetV2-S ~21M parameters).
+- Validation is on a single public dataset; multi-center clinical validation is needed.
 
 ---
 
@@ -157,8 +264,18 @@ This project uses the **Dataset of Annotated Oral Cavity Images for Oral Cancer 
 
 > 侯宇欣, 徐睿杰, 韩俊杰, 赵奎璋, 查鑫悦, 张琥, 吴贯锋. 融合SE注意力与元数据的口腔癌多模态识别[J].
 
+**Dataset**:
+
+> Piyarathne N S, Liyanage S N, Rasnayaka R M S G K, et al. A comprehensive dataset of annotated oral cavity images for diagnosis of oral cancer and oral potentially malignant disorders[J]. Oral Oncology, 2024, 156: 106946.
+
+**Baseline method**:
+
+> Devindi G A I, Dissanayake D M D R, Liyanage S N, et al. Multimodal Deep Convolutional Neural Network Pipeline for AI-Assisted Early Detection of Oral Cancer[J]. IEEE Access, 2024, 12: 124375-124390.
+
+---
+
 ## Authors
 
-- Hou Yuxin, Xu Ruijie, Han Junjie, Zhao Kuizhang, Zha Xinyue
+- **Hou Yuxin**, **Xu Ruijie**, **Han Junjie**, **Zhao Kuizhang**, **Zha Xinyue**
 - School of Mathematics, Southwest Jiaotong University
 - The Third People's Hospital of Chengdu
