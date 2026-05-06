@@ -1,4 +1,3 @@
-![Stars](https://img.shields.io/github/stars/YuZhongFanXing/Oral-Cancer-Multimodal-Recognition)
 # Multimodal Recognition of Oral Cancer Integrating SE Attention and Metadata
 
 > 侯宇欣, 徐睿杰, 韩俊杰, 赵奎璋, 查鑫悦, 张琥, 吴贯锋. 融合SE注意力与元数据的口腔癌多模态识别[J].
