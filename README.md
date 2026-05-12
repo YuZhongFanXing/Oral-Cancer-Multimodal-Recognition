@@ -217,7 +217,7 @@ Without SE attention, model activation is scattered across background regions in
 │   ├── train_utils.py               # ModelEMA, WeightedLabelSmoothingLoss, evaluate
 │   ├── segmentation.py              # Stage 1: ResNet18-UNet training & evaluation
 │   ├── train_img_se_baseline.py     # Stage 2: Main baseline (Full Model)
-│   ├── train_ablation_comparision.py   # Table 2 backbone comparison + Table 4 ablation
+│   ├── train_ablation_comparison.py   # Table 2 backbone comparison + Table 4 ablation
 │   ├── train_fusion_innovation.py   # Table 3 fusion strategy comparison
 │   └── train_meta_only.py           # Table 4 metadata-only baseline
 ├── results/
@@ -232,7 +232,7 @@ Without SE attention, model activation is scattered across background regions in
 1. **Obtain the dataset** from Piyarathne et al. (2024) and place images + CSVs in the expected directories.
 2. **Stage 1**: Run `segmentation.py` to train the oral ROI extraction model and generate segmented images.
 3. **Stage 2 (main)**: Run `train_img_se_baseline.py` for the full multimodal model with 5-fold CV.
-4. **Reproduce tables**: Run `train_ablation_comparision.py` (Tables 2 & 4), `train_fusion_innovation.py` (Table 3), and `train_meta_only.py` (Table 4 metadata row).
+4. **Reproduce tables**: Run `train_ablation_comparison.py` (Tables 2 & 4), `train_fusion_innovation.py` (Table 3), and `train_meta_only.py` (Table 4 metadata row).
 5. All scripts auto-save per-fold checkpoints, training curves, confusion matrices, and ROC curves.
 
 **Note**: All experiment scripts import shared components from `models.py`, `dataset.py`, and `train_utils.py` to eliminate code duplication while maintaining reproducibility.
