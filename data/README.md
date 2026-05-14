@@ -17,6 +17,17 @@ To obtain the full dataset, please refer to:
 
 > Piyarathne N S, Liyanage S N, Rasnayaka R M S G K, et al. A comprehensive dataset of annotated oral cavity images for diagnosis of oral cancer and oral potentially malignant disorders[J]. Oral Oncology, 2024, 156: 106946.
 
+## Example Images
+
+The `examples/` directory contains 3 sample images per category (12 total) from the official dataset:
+
+| Category | Binary Label | Example Images |
+|---|---|---|
+| Healthy | Benign (0) | 3 |
+| Benign | Benign (0) | 3 |
+| OPMD | Malignant (1) | 3 |
+| OCA (Oral Cancer) | Malignant (1) | 3 |
+
 ## Data Preparation
 
 1. Download the original dataset (Images + Annotation.json)

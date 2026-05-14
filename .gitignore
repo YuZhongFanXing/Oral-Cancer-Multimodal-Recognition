@@ -6,10 +6,12 @@ paper/
 *.pt
 *.ckpt
 
-# Dataset images
+# Dataset images (only examples are committed)
 Segmented_Images/
 *.jpg
+!data/examples/*.jpg
 *.jpeg
+!data/examples/*.jpeg
 *.bmp
 
 # Ignore all PNGs except result figures
