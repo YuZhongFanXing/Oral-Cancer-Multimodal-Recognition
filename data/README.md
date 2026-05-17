@@ -109,6 +109,7 @@ The 5-dimensional metadata vector encodes:
   "area": 6990438,
   "iscrowd": 0
 }
+  ```json
 {
   "id": 2,
   "image_id": 1,
