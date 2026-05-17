@@ -8,7 +8,7 @@ This project uses the **Dataset of Annotated Oral Cavity Images for Oral Cancer 
 
 - `Imagewise_Data.csv` — Per-image annotations (Image Name, Category, Clinical Diagnosis, Lesion Count)
 - `Patientwise_Data.csv` — Per-patient metadata (Patient ID, Age, Gender, Smoking, Chewing Betel Quid, Alcohol, Image Count)
-
+- `Annotation.json` — mask
 ## Image Data
 
 The original dataset contains ~3,000 clinical oral cavity images. Images are **not included** in this repository.
@@ -51,3 +51,61 @@ The 5-dimensional metadata vector encodes:
 - **Smoking**: 1.0 for Yes, 0.0 for No
 - **Chewing Betel Quid**: 1.0 for Yes, 0.0 for No
 - **Alcohol**: 1.0 for Yes, 0.0 for No
+  # Dataset Analysis Report
+
+## 1. Image Directory Analysis
+
+- **Total files**: 3000
+- **File type distribution**:
+  - `.jpg`: 3000 files
+
+## 2. Image CSV File Analysis
+
+- **Number of rows**: 3000
+- **Number of columns**: 4
+- **Column names**: `['Image Name', 'Category', 'Clinical Diagnosis', 'Lesion Annotation Count']`
+- **First 5 rows**:
+
+| Image Name | Category | Clinical Diagnosis | Lesion Annotation Count |
+|------------|----------|--------------------|-------------------------|
+| R-01-01    | OPMD     | Leukoplakia        | 1                       |
+| R-01-02    | OPMD     | Leukoplakia        | 1                       |
+| R-01-03    | Benign   | Coated Tongue      | 1                       |
+| R-02-01    | Benign   | VBD                | 1                       |
+| R-02-02    | Benign   | VBD                | 1                       |
+
+- **Data types**:
+
+## 3. Patient CSV File Analysis
+
+- **Number of rows**: 714
+- **Number of columns**: 7
+- **Column names**: `['Patient ID', 'Age', 'Gender', 'Smoking', 'Chewing_Betel_Quid', 'Alcohol', 'Image Count']`
+- **First 5 rows**:
+
+| Patient ID | Age | Gender | Smoking | Chewing_Betel_Quid | Alcohol | Image Count |
+|------------|-----|--------|---------|--------------------|---------|--------------|
+| R-01       | 63  | M      | No      | No                 | No      | 3            |
+| R-02       | 17  | F      | No      | No                 | No      | 8            |
+| R-03       | 70  | M      | No      | No                 | No      | 5            |
+| R-04       | 45  | M      | No      | No                 | No      | 5            |
+| R-05       | 46  | M      | No      | Yes                | No      | 2            |
+
+- **Data types**:
+
+## 4. COCO Annotation JSON File Analysis
+
+- **Main keys**: `['images', 'annotations', 'categories']`
+- **Number of images**: 3000
+- **Example image info**:
+  ```json
+  {"id": 1, "file_name": "R-01-01.jpg"}
+  {
+  "id": 1,
+  "image_id": 1,
+  "category_id": 1,
+  "bbox": [2574, 1739, 464, 562],
+  "segmentation": [2574, 1845, 2848, 1739, 3038, 2088, 2977, 2255, 2908, 2301, 2673, 2058],
+  "area": 6990438,
+  "iscrowd": 0
+}
