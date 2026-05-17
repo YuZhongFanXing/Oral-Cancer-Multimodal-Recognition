@@ -24,27 +24,22 @@ class MultiModalDataset(Dataset):
     @staticmethod
     def encode_meta(info):
         """Encode 5-dim metadata: [Age, Gender, Smoking, Betel, Alcohol].
-
-        Age normalized to [0, 1] (capped at 100).
-        Gender: 1.0 for Male, 0.0 for Female.
-        Behaviour factors: 1.0 for Yes, 0.0 for No.
+        无任何缺失值处理 / 无异常值兜底 / 无默认填充
         """
         feats = []
-        try:
-            feats.append(min(100, max(0, float(info.get('Age', 50)))) / 100.0)
-        except Exception:
-            feats.append(0.5)
-        feats.append(1.0 if str(info.get('Gender')).upper().startswith('M') else 0.0)
+        # 原始年龄读取 + 归一化，无截断、无默认值、无异常捕获
+        feats.append(float(info['Age']) / 100.0)
+        # 原始性别编码
+        feats.append(1.0 if str(info['Gender']).upper().startswith('M') else 0.0)
+        # 原始行为习惯编码
         for k in ['Smoking', 'Chewing_Betel_Quid', 'Alcohol']:
-            feats.append(1.0 if str(info.get(k)).upper() in ['Y', 'YES', '1'] else 0.0)
+            feats.append(1.0 if str(info[k]).upper() in ['Y', 'YES', '1'] else 0.0)
         return np.array(feats, dtype=np.float32)
 
     def __getitem__(self, idx):
         item = self.data[idx]
-        try:
-            img = Image.open(item['path']).convert('RGB')
-        except Exception:
-            img = Image.new('RGB', (448, 448))
+        # 直接读取图像，无缺失/损坏兜底
+        img = Image.open(item['path']).convert('RGB')
         if self.transform:
             img = self.transform(img)
         meta = torch.tensor(self.encode_meta(item['info']), dtype=torch.float32)
