@@ -8,7 +8,7 @@ This project uses the **Dataset of Annotated Oral Cavity Images for Oral Cancer 
 
 - `Imagewise_Data.csv` — Per-image annotations (Image Name, Category, Clinical Diagnosis, Lesion Count)
 - `Patientwise_Data.csv` — Per-patient metadata (Patient ID, Age, Gender, Smoking, Chewing Betel Quid, Alcohol, Image Count)
-- `Annotation.json` — mask，   ID: 1, 名称: Lesion； ID: 2, 名称: Oral Cavity
+- `Annotation.json` — mask，   ID: 1, Lesion； ID: 2,  Oral Cavity
 ## Image Data
 
 The original dataset contains ~3,000 clinical oral cavity images. Images are **not included** in this repository.
